@@ -6,6 +6,7 @@ description = "Laptop pose fusion node: UDP ingest from phones → sync/fuse →
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+phone = ["mediapipe>=0.10.0", "opencv-python>=4.8.0"]
 
 [build-system]
 requires = ["setuptools>=61"]

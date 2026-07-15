@@ -37,3 +37,6 @@ class PoseStore:
 
     def nearest_all(self, target_ms: int) -> dict[str, PoseFrame | None]:
         return {cid: buf.nearest(target_ms) for cid, buf in self._cameras.items()}
+
+    def latest_all(self) -> dict[str, PoseFrame | None]:
+        return {cid: buf.latest for cid, buf in self._cameras.items()}
