@@ -1,0 +1,18 @@
+[project]
+name = "outpost-camera-merge"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "Laptop pose fusion node: UDP ingest from phones → sync/fuse → display Pi"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["outpost*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
