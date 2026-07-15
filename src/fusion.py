@@ -97,7 +97,7 @@ def fuse_poses(
     for frame in frames.values():
         if frame is None:
             continue
-        if len(frame.landmarks) != NUM_LANDMARKS:
+        if len(frame.landmarks) < NUM_LANDMARKS:
             continue
         calibration = CAMERA_CALIBRATIONS.get(frame.camera_id)
         if calibration is None:

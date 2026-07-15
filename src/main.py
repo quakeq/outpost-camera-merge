@@ -32,6 +32,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print per-camera ingest and fusion stats",
     )
+    parser.add_argument(
+        "--viz",
+        action="store_true",
+        help="Show live 3D matplotlib view of fused pose in world XYZ space",
+    )
     return parser.parse_args()
 
 
@@ -53,6 +58,17 @@ def main() -> None:
     dest = "disabled" if args.no_display else f"{DISPLAY_HOST}:{DISPLAY_PORT}"
     print(f"Listening UDP :{INGEST_PORT} | Fusion {FUSION_HZ} Hz → {dest}")
 
+    visualizer = None
+    if args.viz:
+        try:
+            from src.visualize import PoseVisualizer3D
+        except ImportError as exc:
+            raise SystemExit(
+                "matplotlib is required for --viz. Install with: pip install -e \".[viz]\""
+            ) from exc
+        visualizer = PoseVisualizer3D()
+        print("3D visualization enabled (close window or Ctrl+C to stop)")
+
     try:
         while True:
             t0 = time.perf_counter()
@@ -73,6 +89,9 @@ def main() -> None:
             if fused:
                 if display_sock is not None:
                     send_fused_pose(display_sock, fused)
+                if visualizer is not None and not visualizer.update(fused):
+                    print("Visualization window closed")
+                    break
                 frame_id += 1
                 fused_count += 1
                 if args.verbose:
@@ -96,10 +115,14 @@ def main() -> None:
             elapsed = time.perf_counter() - t0
             time.sleep(max(0.0, interval - elapsed))
     except KeyboardInterrupt:
+        pass
+    finally:
         stop.set()
         rx.join(timeout=1.0)
         if display_sock is not None:
             display_sock.close()
+        if visualizer is not None:
+            visualizer.close()
 
 
 if __name__ == "__main__":

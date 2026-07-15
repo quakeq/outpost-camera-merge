@@ -23,8 +23,8 @@ DISPLAY_PORT = int(os.environ.get("OUTPOST_DISPLAY_PORT", "9100"))
 CAMERA_IDS = _load_camera_ids()
 
 FUSION_HZ = 30
-SYNC_OFFSET_MS = 1000  # target time = now - offset
-MAX_POSE_AGE_MS = 1000  # mark camera stale beyond this
+SYNC_OFFSET_MS = 200  # target time = now - offset
+MAX_POSE_AGE_MS = 200  # mark camera stale beyond this
 BUFFER_SIZE = 4  # ~1-2 frames per camera at 30 FPS
 
 NUM_LANDMARKS = 33
