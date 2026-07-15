@@ -18,4 +18,7 @@ BUFFER_SIZE = 4  # ~1-2 frames per camera at 30 FPS
 NUM_LANDMARKS = 33
 
 CAMERA_A_FOV_DEG = 48
+CAMERA_A_POS_MM = [1000,1000,2000, 0, 10, 45] //x,y,z,roll,pitch,yaw #dist in mm, rotation in deg
+
+
 CAMERA_B_FOV_DEG = 45
