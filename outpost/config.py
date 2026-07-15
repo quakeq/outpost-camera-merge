@@ -16,3 +16,6 @@ MAX_POSE_AGE_MS = 100  # mark camera stale beyond this
 BUFFER_SIZE = 4  # ~1-2 frames per camera at 30 FPS
 
 NUM_LANDMARKS = 33
+
+CAMERA_A_FOV_DEG = 48
+CAMERA_B_FOV_DEG = 45
