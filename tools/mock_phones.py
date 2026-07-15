@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simulate three phones sending UDP pose packets at ~30 Hz."""
+"""Simulate calibrated phones sending UDP pose packets at ~30 Hz."""
 
 from __future__ import annotations
 
@@ -15,14 +15,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pose_factory import make_packet  # noqa: E402
 
 CAMERA_OFFSETS = {
-    "phone_a": (0.0, 0.0, 0.0),
-    "phone_b": (0.05, 0.0, 0.0),
-    "phone_c": (-0.05, 0.02, 0.0),
+    "camera-a": (0.0, 0.0, 0.0),
+    "camera-b": (0.05, 0.0, 0.0),
 }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Mock 3-phone UDP pose senders")
+    parser = argparse.ArgumentParser(description="Mock calibrated UDP pose senders")
     parser.add_argument("--host", default="127.0.0.1", help="Fusion ingest host")
     parser.add_argument("--port", type=int, default=9000, help="Fusion ingest port")
     parser.add_argument("--hz", type=float, default=30.0, help="Send rate per camera")

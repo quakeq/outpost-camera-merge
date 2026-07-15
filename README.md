@@ -7,10 +7,10 @@ See [PLAN.md](PLAN.md) for network layout, timing, and architecture.
 ## Architecture
 
 ```
-Phone A/B/C  ──UDP :9000──►  Laptop (ingest + fuse @ 30 Hz)  ──UDP :9100──►  Display Pi
+Camera A/B  ──UDP :9000──►  Laptop (ingest + fuse @ 30 Hz)  ──UDP :9100──►  Display Pi
 ```
 
-Phones run MediaPipe; this package only ingests, syncs, and fuses. The fusion stub is a visibility-weighted average (replace with calibrated transforms later).
+Phones run MediaPipe; this package ingests, syncs, transforms each calibrated camera pose into the shared world frame, and fuses those world-frame landmarks.
 
 ## Install
 
@@ -57,7 +57,7 @@ OUTPOST_DISPLAY_HOST=127.0.0.1 python -m outpost.main
 python tools/mock_phones.py
 ```
 
-Expect ~30 fused frames/sec on the display mock. Stop one phone sender to see degraded mode (`cameras_used` drops to 2).
+Expect ~30 fused frames/sec on the display mock. Stop one phone sender to see degraded mode (`cameras_used` drops to 1).
 
 ## Tests
 
@@ -67,7 +67,7 @@ pytest -v
 
 ## Single phone (real hardware)
 
-One phone is enough — fusion runs in degraded mode with `cameras_used=['phone_a']`.
+One phone is enough — fusion runs in degraded mode with `cameras_used=['camera-a']`.
 
 ### 1. Network
 
@@ -123,7 +123,7 @@ Copy the repo (or at least `tools/phone_sender.py` + `tools/pose_factory.py`) to
 
 ```bash
 pip install mediapipe opencv-python
-python tools/phone_sender.py --camera-id phone_a
+python tools/phone_sender.py --camera-id camera-a
 ```
 
 (`--host` defaults to `192.168.50.1`; override if your laptop is not the AP.)
@@ -135,7 +135,7 @@ Install [IP Webcam](https://play.google.com/store/apps/details?id=com.pas.webcam
 
 ```bash
 pip install -e ".[phone]"
-python tools/phone_sender.py --host 127.0.0.1 --camera-id phone_a \
+python tools/phone_sender.py --host 127.0.0.1 --camera-id camera-a \
   --source "http://PHONE_IP:8080/video"
 ```
 
@@ -145,7 +145,7 @@ Use a second terminal for fusion (`python -m outpost.main --no-display`). The se
 
 ```bash
 pip install -e ".[phone]"
-python tools/phone_sender.py --host 127.0.0.1 --camera-id phone_a --source 0
+python tools/phone_sender.py --host 127.0.0.1 --camera-id camera-a --source 0
 ```
 
 ### Packet requirements
@@ -154,7 +154,7 @@ The phone must send JSON UDP to `192.168.50.1:9000` (laptop ingest):
 
 | Field | Value |
 |-------|-------|
-| `camera_id` | `phone_a` (or `phone_b` / `phone_c`) |
+| `camera_id` | `camera-a` or `camera-b` |
 | `seq` | monotonically increasing integer |
 | `t_capture_ms` | capture time in ms since epoch |
 | `landmarks` | 33 entries: `{i, x, y, z, v}` |

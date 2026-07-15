@@ -52,8 +52,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=9000, help="Fusion ingest UDP port")
     parser.add_argument(
         "--camera-id",
-        default="phone_a",
-        choices=("phone_a", "phone_b", "phone_c"),
+        default="camera-a",
+        choices=("camera-a", "camera-b"),
         help="Must match an ID in outpost.config.CAMERA_IDS",
     )
     parser.add_argument(
