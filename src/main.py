@@ -37,6 +37,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show live 3D matplotlib view of fused pose in world XYZ space",
     )
+    parser.add_argument(
+        "--viz-cameras",
+        action="store_true",
+        help="Show side-by-side 2D camera views with pose overlay for each phone",
+    )
     return parser.parse_args()
 
 
@@ -59,15 +64,21 @@ def main() -> None:
     print(f"Listening UDP :{INGEST_PORT} | Fusion {FUSION_HZ} Hz → {dest}")
 
     visualizer = None
-    if args.viz:
+    camera_visualizer = None
+    if args.viz or args.viz_cameras:
         try:
-            from src.visualize import PoseVisualizer3D
+            from src.visualize import DualCameraPoseVisualizer, PoseVisualizer3D
         except ImportError as exc:
             raise SystemExit(
-                "matplotlib is required for --viz. Install with: pip install -e \".[viz]\""
+                "matplotlib is required for --viz / --viz-cameras. "
+                'Install with: pip install -e ".[viz]"'
             ) from exc
-        visualizer = PoseVisualizer3D()
-        print("3D visualization enabled (close window or Ctrl+C to stop)")
+        if args.viz:
+            visualizer = PoseVisualizer3D()
+            print("3D visualization enabled (close window or Ctrl+C to stop)")
+        if args.viz_cameras:
+            camera_visualizer = DualCameraPoseVisualizer(CAMERA_IDS)
+            print("Camera overlay view enabled (close window or Ctrl+C to stop)")
 
     try:
         while True:
@@ -86,6 +97,9 @@ def main() -> None:
                         )
             frames = store.nearest_all(target_ms)
             fused = fuse_poses(frames, target_ms, frame_id)
+            if camera_visualizer is not None and not camera_visualizer.update(frames, fused):
+                print("Camera visualization window closed")
+                break
             if fused:
                 if display_sock is not None:
                     send_fused_pose(display_sock, fused)
@@ -123,6 +137,8 @@ def main() -> None:
             display_sock.close()
         if visualizer is not None:
             visualizer.close()
+        if camera_visualizer is not None:
+            camera_visualizer.close()
 
 
 if __name__ == "__main__":

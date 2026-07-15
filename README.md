@@ -115,6 +115,26 @@ OUTPOST_DISPLAY_HOST=127.0.0.1 python -m outpost.main
 
 Add `--verbose` to see every ingest and fused frame.
 
+Live 3D fused skeleton:
+
+```bash
+python -m outpost.main --no-display --viz
+```
+
+Side-by-side camera views with 2D pose overlay (uses each phone's normalized image landmarks):
+
+```bash
+python -m outpost.main --no-display --viz-cameras
+```
+
+Both views together:
+
+```bash
+python -m outpost.main --no-display --viz --viz-cameras
+```
+
+Requires `pip install -e ".[viz]"` (matplotlib).
+
 ### 4. Send pose from the phone
 
 **Option A — Python on the phone (Termux / Pydroid)**
