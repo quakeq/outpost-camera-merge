@@ -2,7 +2,7 @@
 
 from collections import deque
 
-from outpost.models import PoseFrame
+from src.models import PoseFrame
 
 
 class CameraBuffer:

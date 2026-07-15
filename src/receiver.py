@@ -5,9 +5,9 @@ import socket
 import threading
 import time
 
-from outpost.buffers import PoseStore
-from outpost.config import INGEST_HOST, INGEST_PORT
-from outpost.models import Landmark, PoseFrame
+from src.buffers import PoseStore
+from src.config import INGEST_HOST, INGEST_PORT
+from src.models import Landmark, PoseFrame
 
 
 def _parse_packet(data: bytes, source_ip: str) -> PoseFrame:

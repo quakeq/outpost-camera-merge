@@ -3,8 +3,8 @@
 import json
 import socket
 
-from outpost.config import DISPLAY_HOST, DISPLAY_PORT
-from outpost.models import FusedPose
+from src.config import DISPLAY_HOST, DISPLAY_PORT
+from src.models import FusedPose
 
 
 def send_fused_pose(sock: socket.socket, pose: FusedPose) -> None:

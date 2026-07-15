@@ -124,3 +124,41 @@ def test_degraded_mode_skips_stale_and_uncalibrated_cameras():
     fused = fuse_poses(frames, target, 0)
     assert fused is not None
     assert fused.cameras_used == ["camera-a"]
+
+
+def test_skips_frames_with_incomplete_landmarks(monkeypatch):
+    target = 5000
+    monkeypatch.setattr(
+        "outpost.fusion.CAMERA_CALIBRATIONS",
+        {
+            "camera-a": _calibration("camera-a", (0.0, 0.0, 0.0)),
+            "camera-b": _calibration("camera-b", (10.0, 0.0, 0.0)),
+        },
+    )
+
+    incomplete = PoseFrame(
+        camera_id="camera-a",
+        seq=1,
+        t_capture_ms=target,
+        landmarks=[],
+        receive_ms=target,
+        source_ip="127.0.0.1",
+    )
+    complete = make_pose_frame("camera-b", target, 1, offset=(1.0, 0.0, 0.0))
+    fused = fuse_poses({"camera-a": incomplete, "camera-b": complete}, target, 0)
+    assert fused is not None
+    assert fused.cameras_used == ["camera-b"]
+    assert len(fused.landmarks) == NUM_LANDMARKS
+
+
+def test_returns_none_when_only_incomplete_landmarks():
+    target = 5000
+    empty = PoseFrame(
+        camera_id="camera-a",
+        seq=1,
+        t_capture_ms=target,
+        landmarks=[],
+        receive_ms=target,
+        source_ip="127.0.0.1",
+    )
+    assert fuse_poses({"camera-a": empty}, target, 0) is None

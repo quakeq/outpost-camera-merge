@@ -5,8 +5,8 @@ import socket
 import threading
 import time
 
-from outpost.buffers import PoseStore
-from outpost.config import (
+from src.buffers import PoseStore
+from src.config import (
     BUFFER_SIZE,
     CAMERA_IDS,
     DISPLAY_HOST,
@@ -15,9 +15,9 @@ from outpost.config import (
     INGEST_PORT,
     SYNC_OFFSET_MS,
 )
-from outpost.fusion import fuse_poses
-from outpost.receiver import run_receiver
-from outpost.sender import send_fused_pose
+from src.fusion import fuse_poses
+from src.receiver import run_receiver
+from src.sender import send_fused_pose
 
 
 def _parse_args() -> argparse.Namespace:
@@ -68,7 +68,6 @@ def main() -> None:
                             f"ingest {cid} seq={latest.seq} "
                             f"from {latest.source_ip} age={age}ms"
                         )
-
             frames = store.nearest_all(target_ms)
             fused = fuse_poses(frames, target_ms, frame_id)
             if fused:
@@ -91,6 +90,8 @@ def main() -> None:
                     if elapsed >= 2.0:
                         fused_count = 0
                         stats_start = time.perf_counter()
+            else:
+                print("fused brokey")
 
             elapsed = time.perf_counter() - t0
             time.sleep(max(0.0, interval - elapsed))

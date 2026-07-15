@@ -7,8 +7,8 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
-from outpost.config import CAMERA_CONFIG_PATH, MAX_POSE_AGE_MS, NUM_LANDMARKS
-from outpost.models import FusedPose, Landmark, PoseFrame
+from src.config import CAMERA_CONFIG_PATH, MAX_POSE_AGE_MS, NUM_LANDMARKS
+from src.models import FusedPose, Landmark, PoseFrame
 
 
 Matrix3 = tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]
@@ -96,6 +96,8 @@ def fuse_poses(
     active: list[tuple[PoseFrame, CameraCalibration]] = []
     for frame in frames.values():
         if frame is None:
+            continue
+        if len(frame.landmarks) != NUM_LANDMARKS:
             continue
         calibration = CAMERA_CALIBRATIONS.get(frame.camera_id)
         if calibration is None:
