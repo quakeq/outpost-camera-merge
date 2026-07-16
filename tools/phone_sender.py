@@ -1,148 +1,136 @@
 #!/usr/bin/env python3
-"""Send MediaPipe pose landmarks over UDP (run on phone or laptop)."""
+"""Run MediaPipe Pose on a camera/video stream and send landmarks over UDP."""
 
 from __future__ import annotations
 
 import argparse
 import socket
-import sys
+import threading
 import time
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from pose_factory import make_packet  # noqa: E402
+from pose_factory import make_packet
 
 
-def _open_capture(source: str):
-    import cv2
+def _video_source(value: str) -> int | str:
+    try:
+        return int(value)
+    except ValueError:
+        return value
 
-    if source.isdigit():
-        return cv2.VideoCapture(int(source))
-    return cv2.VideoCapture(source)
 
+class FreshestFrame(threading.Thread):
+    """Continuously read a capture, keeping only the most recent frame.
 
-def _landmarks_from_results(results) -> list[dict] | None:
-    world = results.pose_world_landmarks
-    if not world:
-        return None
-    out: list[dict] = []
-    for i, lm in enumerate(world.landmark):
-        out.append(
-            {
-                "i": i,
-                "x": lm.x,
-                "y": lm.y,
-                "z": lm.z,
-                "v": lm.visibility,
-            }
-        )
-    return out
+    MediaPipe inference is often slower than the capture rate, which lets
+    OpenCV's internal buffer back up so ``read()`` returns increasingly stale
+    frames. Draining the source on a dedicated thread ensures inference always
+    runs on the latest frame and ``t_capture_ms`` reflects real capture time.
+    """
+
+    def __init__(self, capture: "cv2.VideoCapture") -> None:
+        super().__init__(daemon=True)
+        self._capture = capture
+        self._lock = threading.Lock()
+        self._latest: tuple[int, "cv2.Mat"] | None = None
+        self._last_seen = -1
+        self._new_frame = threading.Condition(self._lock)
+        self._running = True
+
+    def run(self) -> None:
+        counter = 0
+        while self._running:
+            ok, image = self._capture.read()
+            if not ok:
+                break
+            t_capture_ms = time.time_ns() // 1_000_000
+            counter += 1
+            with self._new_frame:
+                self._latest = (t_capture_ms, image)
+                self._last_seen = counter
+                self._new_frame.notify_all()
+        with self._new_frame:
+            self._running = False
+            self._new_frame.notify_all()
+
+    def read(self, seen: int) -> tuple[int, int, "cv2.Mat"] | None:
+        """Block until a frame newer than ``seen`` is available.
+
+        Returns ``(sequence, t_capture_ms, image)`` or ``None`` when the source
+        has ended.
+        """
+
+        with self._new_frame:
+            self._new_frame.wait_for(
+                lambda: not self._running or self._last_seen > seen
+            )
+            if self._latest is None or self._last_seen <= seen:
+                return None
+            t_capture_ms, image = self._latest
+            return self._last_seen, t_capture_ms, image
+
+    def stop(self) -> None:
+        self._running = False
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="MediaPipe pose → UDP packets for outpost fusion ingest"
-    )
-    parser.add_argument(
-        "--host",
-        default="192.168.50.1",
-        help="Laptop fusion node IP (POSE-LAN default: 192.168.50.1)",
-    )
-    parser.add_argument("--port", type=int, default=9000, help="Fusion ingest UDP port")
-    parser.add_argument(
-        "--camera-id",
-        default="camera-a",
-        choices=("camera-a", "camera-b"),
-        help="Must match an ID in outpost.config.CAMERA_IDS",
-    )
-    parser.add_argument(
-        "--source",
-        default="0",
-        help="Camera index (0) or URL (IP Webcam: http://PHONE_IP:8080/video)",
-    )
-    parser.add_argument("--hz", type=float, default=30.0, help="Target send rate")
-    parser.add_argument(
-        "--model-complexity",
-        type=int,
-        default=1,
-        choices=(0, 1, 2),
-        help="MediaPipe pose model complexity (0=fast, 2=accurate)",
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="192.168.50.1")
+    parser.add_argument("--port", type=int, default=9000)
+    parser.add_argument("--source", default="0", help="camera index, URL, or video path")
+    parser.add_argument("--model-complexity", type=int, choices=(0, 1, 2), default=0)
     args = parser.parse_args()
 
-    import cv2
-    import mediapipe as mp
-
-    cap = _open_capture(args.source)
-    if not cap.isOpened():
-        print(f"Failed to open camera source: {args.source!r}", file=sys.stderr)
-        sys.exit(1)
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    interval = 1.0 / args.hz
-    seq = 0
-    sent = 0
-    window_start = time.perf_counter()
-
-    mp_pose = mp.solutions.pose
-    print(
-        f"Sending {args.camera_id} @ {args.hz} Hz → {args.host}:{args.port} "
-        f"(source={args.source!r})"
-    )
-
     try:
-        with mp_pose.Pose(
-            model_complexity=args.model_complexity,
-            enable_segmentation=False,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        ) as pose:
+        import cv2
+        import mediapipe as mp
+    except ImportError as exc:
+        raise SystemExit('install phone dependencies with: pip install -e ".[phone]"') from exc
+
+    capture = cv2.VideoCapture(_video_source(args.source))
+    if not capture.isOpened():
+        raise SystemExit(f"could not open video source {args.source!r}")
+
+    destination = (args.host, args.port)
+    seq = 0
+    reader = FreshestFrame(capture)
+    reader.start()
+    pose_api = mp.solutions.pose
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock, pose_api.Pose(
+        static_image_mode=False,
+        model_complexity=args.model_complexity,
+        enable_segmentation=False,
+    ) as pose:
+        seen = -1
+        try:
             while True:
-                t0 = time.perf_counter()
-                ok, frame = cap.read()
-                if not ok:
-                    print("Camera read failed", file=sys.stderr)
-                    time.sleep(0.1)
+                frame = reader.read(seen)
+                if frame is None:
+                    break
+                seen, t_capture_ms, image = frame
+                result = pose.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                if result.pose_landmarks is None:
                     continue
-
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = pose.process(rgb)
-                landmarks = _landmarks_from_results(results)
-                if landmarks is None:
-                    elapsed = time.perf_counter() - t0
-                    time.sleep(max(0.0, interval - elapsed))
-                    continue
-
+                landmarks = [
+                    {
+                        "i": index,
+                        "x": landmark.x,
+                        "y": landmark.y,
+                        "z": landmark.z,
+                        "v": landmark.visibility,
+                    }
+                    for index, landmark in enumerate(result.pose_landmarks.landmark)
+                ]
+                sock.sendto(
+                    make_packet(seq, landmarks, t_capture_ms=t_capture_ms),
+                    destination,
+                )
                 seq += 1
-                t_ms = int(time.time() * 1000)
-                packet = {
-                    "camera_id": args.camera_id,
-                    "seq": seq,
-                    "t_capture_ms": t_ms,
-                    "landmarks": landmarks,
-                }
-                import json
-
-                sock.sendto(json.dumps(packet).encode("utf-8"), (args.host, args.port))
-                sent += 1
-
-                now = time.perf_counter()
-                if sent == 1 or sent % 30 == 0:
-                    elapsed = now - window_start
-                    fps = sent / elapsed if elapsed > 0 else 0.0
-                    print(f"seq={seq} landmarks=33 fps≈{fps:.1f}")
-                    if elapsed >= 2.0:
-                        sent = 0
-                        window_start = now
-
-                elapsed = time.perf_counter() - t0
-                time.sleep(max(0.0, interval - elapsed))
-    except KeyboardInterrupt:
-        print("\nstopped")
-    finally:
-        cap.release()
-        sock.close()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            reader.stop()
+            capture.release()
+    print(f"sent {seq} pose frames")
 
 
 if __name__ == "__main__":

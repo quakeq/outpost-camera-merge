@@ -1,119 +1,129 @@
-"""End-to-end UDP pipeline: mock phones → fusion → mock display."""
+from __future__ import annotations
 
+from dataclasses import replace
 import json
 import socket
-import threading
-import time
 
-from outpost.buffers import PoseStore
-from outpost.config import BUFFER_SIZE, CAMERA_IDS, FUSION_HZ, NUM_LANDMARKS, SYNC_OFFSET_MS
-from outpost.fusion import fuse_poses
-from outpost.receiver import run_receiver
-from outpost.sender import send_fused_pose
-from tests.helpers import sample_landmarks
+import pytest
 
+from outpost.config import Settings
+from outpost.main import Forwarder
+from outpost.sender import DatagramTooLarge, UdpSender, encode_message
 
-def _free_port() -> int:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
+from .helpers import NOW_MS, packet
 
 
-def _phone_packet(camera_id: str, seq: int, t_ms: int) -> bytes:
+def test_valid_frame_is_forwarded_over_udp(settings: Settings) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.settimeout(1)
+        host, port = receiver.getsockname()
+        with UdpSender(host, port) as sender:
+            forwarder = Forwarder(settings, sender)
+            assert forwarder.process_datagram(
+                packet(seq=4), ("127.0.0.1", 5000), receive_ms=NOW_MS
+            )
+            payload, _ = receiver.recvfrom(65_507)
+
+    message = json.loads(payload)
+    assert message["frame_id"] == 4
+    assert len(message["accepted"]) == 33
+    assert message["rejected"] == []
+    assert forwarder.metrics.frames_forwarded == 1
+
+
+def test_partial_rejection_is_encoded(settings: Settings) -> None:
     landmarks = [
-        {"i": lm.i, "x": lm.x, "y": lm.y, "z": lm.z, "v": lm.v}
-        for lm in sample_landmarks()
+        {"i": 0, "x": 0.5, "y": 0.5, "z": 0, "v": 0.1},
+        {"i": 1, "x": 0.5, "y": 0.5, "z": 0, "v": 1},
+        {"i": 2, "x": 0.5, "y": 0.5, "z": 0, "v": 1},
     ]
-    return json.dumps(
-        {
-            "camera_id": camera_id,
-            "seq": seq,
-            "t_capture_ms": t_ms,
-            "landmarks": landmarks,
-        }
-    ).encode("utf-8")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.settimeout(1)
+        with UdpSender(*receiver.getsockname()) as sender:
+            forwarder = Forwarder(settings, sender)
+            assert forwarder.process_datagram(
+                packet(landmarks=landmarks),
+                ("127.0.0.1", 5000),
+                receive_ms=NOW_MS,
+            )
+            payload, _ = receiver.recvfrom(65_507)
+    message = json.loads(payload)
+    assert [item["i"] for item in message["accepted"]] == [1, 2]
+    assert 0 in message["rejected"]
+    assert forwarder.metrics.landmark_rejections["low_visibility"] == 1
 
 
-def test_end_to_end_fusion_pipeline(monkeypatch):
-    ingest_port = _free_port()
-    display_port = _free_port()
+def test_dropped_and_out_of_order_frames_are_not_sent(
+    settings: Settings,
+) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.settimeout(0.05)
+        with UdpSender(*receiver.getsockname()) as sender:
+            forwarder = Forwarder(settings, sender)
+            assert not forwarder.process_datagram(
+                packet(seq=2, capture_ms=NOW_MS - 151),
+                ("127.0.0.1", 5000),
+                receive_ms=NOW_MS,
+            )
+            assert not forwarder.process_datagram(
+                packet(seq=2),
+                ("127.0.0.1", 5000),
+                receive_ms=NOW_MS,
+            )
+            with pytest.raises(socket.timeout):
+                receiver.recvfrom(65_507)
+    assert forwarder.metrics.frame_rejections["stale"] == 1
+    assert forwarder.metrics.frame_rejections["out_of_order"] == 1
 
-    import outpost.config as config
-    import outpost.receiver as receiver_mod
-    import outpost.sender as sender_mod
 
-    monkeypatch.setattr(config, "INGEST_PORT", ingest_port)
-    monkeypatch.setattr(config, "DISPLAY_HOST", "127.0.0.1")
-    monkeypatch.setattr(config, "DISPLAY_PORT", display_port)
-    monkeypatch.setattr(receiver_mod, "INGEST_PORT", ingest_port)
-    monkeypatch.setattr(sender_mod, "DISPLAY_HOST", "127.0.0.1")
-    monkeypatch.setattr(sender_mod, "DISPLAY_PORT", display_port)
+def test_heartbeat_is_sent_as_json(settings: Settings) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.settimeout(1)
+        with UdpSender(*receiver.getsockname()) as sender:
+            forwarder = Forwarder(settings, sender)
+            assert forwarder.send_heartbeat(NOW_MS)
+            payload, _ = receiver.recvfrom(65_507)
+    assert json.loads(payload) == {"type": "heartbeat", "t_send_ms": NOW_MS}
+    assert forwarder.metrics.heartbeats_sent == 1
 
-    display_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    display_sock.bind(("127.0.0.1", display_port))
-    display_sock.settimeout(0.5)
 
-    store = PoseStore(CAMERA_IDS, BUFFER_SIZE)
-    stop = threading.Event()
-    rx = threading.Thread(target=run_receiver, args=(store, stop), daemon=True)
-    rx.start()
+def test_oversized_input_is_not_forwarded(settings: Settings) -> None:
+    tiny = replace(settings, max_datagram_bytes=20)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        with UdpSender(
+            *receiver.getsockname(), max_datagram_bytes=tiny.max_datagram_bytes
+        ) as sender:
+            forwarder = Forwarder(tiny, sender)
+            assert not forwarder.process_datagram(
+                packet(), ("127.0.0.1", 5000), receive_ms=NOW_MS
+            )
+    assert forwarder.metrics.frame_rejections["datagram_too_large"] == 1
 
-    fused_packets: list[dict] = []
-    fusion_done = threading.Event()
 
-    def fusion_loop() -> None:
-        out_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        interval = 1.0 / FUSION_HZ
-        frame_id = 0
-        try:
-            while not stop.is_set() and not fusion_done.is_set():
-                t0 = time.perf_counter()
-                now_ms = int(time.time() * 1000)
-                target_ms = now_ms - SYNC_OFFSET_MS
-                frames = store.nearest_all(target_ms)
-                fused = fuse_poses(frames, target_ms, frame_id)
-                if fused:
-                    send_fused_pose(out_sock, fused)
-                    frame_id += 1
-                elapsed = time.perf_counter() - t0
-                time.sleep(max(0.0, interval - elapsed))
-        finally:
-            out_sock.close()
+def test_observer_receives_frame_and_result(settings: Settings) -> None:
+    seen: list[tuple[int, bool]] = []
 
-    fusion_thread = threading.Thread(target=fusion_loop, daemon=True)
-    fusion_thread.start()
-    time.sleep(0.05)
+    def observer(frame, result) -> None:
+        seen.append((frame.seq, result.frame is not None))
 
-    phone_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        # Send a burst of aligned frames so SYNC_OFFSET_MS still finds them in-window
-        for seq in range(1, 6):
-            t_ms = int(time.time() * 1000)
-            for cid in CAMERA_IDS:
-                phone_sock.sendto(_phone_packet(cid, seq, t_ms), ("127.0.0.1", ingest_port))
-            time.sleep(0.02)
+    forwarder = Forwarder(settings, None, observer=observer)
+    assert forwarder.process_datagram(
+        packet(seq=4), ("127.0.0.1", 5000), receive_ms=NOW_MS
+    )
+    assert not forwarder.process_datagram(
+        packet(seq=1, capture_ms=NOW_MS - 151),
+        ("127.0.0.1", 5000),
+        receive_ms=NOW_MS,
+    )
 
-        deadline = time.time() + 3.0
-        while time.time() < deadline and len(fused_packets) < 2:
-            try:
-                data, _ = display_sock.recvfrom(65535)
-                fused_packets.append(json.loads(data.decode("utf-8")))
-            except socket.timeout:
-                continue
-    finally:
-        fusion_done.set()
-        stop.set()
-        phone_sock.close()
-        display_sock.close()
-        rx.join(timeout=2.0)
-        fusion_thread.join(timeout=2.0)
+    assert seen == [(4, True), (1, False)]
 
-    assert len(fused_packets) >= 1
-    first = fused_packets[0]
-    assert len(first["landmarks"]) == NUM_LANDMARKS
-    assert set(first["cameras_used"]) == set(CAMERA_IDS)
 
-    if len(fused_packets) >= 2:
-        assert fused_packets[1]["frame_id"] > fused_packets[0]["frame_id"]
+def test_encoder_enforces_limit() -> None:
+    with pytest.raises(DatagramTooLarge):
+        encode_message({"value": "long"}, max_bytes=5)

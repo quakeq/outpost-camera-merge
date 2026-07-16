@@ -1,63 +1,147 @@
-# Outpost Camera Merge
+# Outpost Landmark Forwarder
 
-Laptop fusion node for multi-phone MediaPipe pose → synced world skeleton → rotating display Pi.
+Low-latency laptop service for:
 
-See [PLAN.md](PLAN.md) for network layout, timing, and architecture.
-
-## Architecture
-
-```
-Camera A/B  ──UDP :9000──►  Laptop (ingest + fuse @ 30 Hz)  ──UDP :9100──►  Display Pi
+```text
+Phone MediaPipe → UDP :9000 → validate/filter → UDP :9100 → ESP32
 ```
 
-Phones run MediaPipe; this package ingests, syncs, transforms each calibrated camera pose into the shared world frame, and fuses those world-frame landmarks.
+Each phone frame is handled independently and forwarded immediately. The laptop
+does not fuse cameras or invent replacement landmarks. See [PLAN.md](PLAN.md)
+for the complete network and hardware design.
 
-## Install
+## Install and run
+
+Python 3.11 or newer is required.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-```
-
-Requires Python 3.11+.
-
-## Run fusion node
-
-Production (POSE-LAN defaults to display at `192.168.50.20:9100`):
-
-```bash
 python -m outpost.main
 ```
 
-Local testing against mock display:
+The defaults listen on `0.0.0.0:9000` and send to
+`192.168.50.20:9100`. Add `--verbose` for every decision or `--no-forward`
+to validate and log without sending.
 
-```bash
-OUTPOST_DISPLAY_HOST=127.0.0.1 python -m outpost.main
+The phone and laptop clocks must be synchronized closely enough for the
+150 ms stale-frame check. On Linux, allow input with
+`sudo ufw allow 9000/udp` if a firewall is active.
+
+## Wire protocol
+
+The phone sends one JSON object per UDP datagram:
+
+```json
+{
+  "seq": 1842,
+  "t_capture_ms": 1784185200123,
+  "landmarks": [
+    {"i": 0, "x": 0.51, "y": 0.22, "z": -0.08, "v": 0.98}
+  ]
+}
 ```
 
-Environment overrides:
+`seq` must increase monotonically for the process lifetime. Timestamps are Unix
+epoch milliseconds. Landmark indices must be unique; scalar quality is checked
+individually so one bad landmark does not necessarily drop the frame.
 
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `OUTPOST_INGEST_PORT` | `9000` | UDP listen port for phone packets |
-| `OUTPOST_DISPLAY_HOST` | `192.168.50.20` | Display Pi host |
-| `OUTPOST_DISPLAY_PORT` | `9100` | Display UDP port |
+The ESP32 receives:
 
-## Local smoke test (3 terminals)
+```json
+{
+  "frame_id": 1842,
+  "t_capture_ms": 1784185200123,
+  "accepted": [
+    {"i": 0, "x": 0.51, "y": 0.22, "z": -0.08, "v": 0.98}
+  ],
+  "rejected": [1, 2]
+}
+```
+
+Accepted and rejected indices are sorted. Missing expected landmarks are
+rejected explicitly; coordinates are never replaced with zeroes. When no frame
+is forwarded for 500 ms, the laptop sends:
+
+```json
+{"type":"heartbeat","t_send_ms":1784185200623}
+```
+
+## Filtering
+
+A whole frame is discarded for malformed JSON/structure, duplicate indices,
+non-increasing sequence, stale/future timestamp, impossible count, or fewer than
+the configured minimum number of good landmarks.
+
+Individual landmarks are rejected for unknown index, non-numeric or non-finite
+values, visibility below threshold, coordinates outside safety bounds, or a
+3D jump from the last successfully forwarded position. A dropped frame never
+updates motion history. Rejection counts and forwarding rates are logged
+periodically.
+
+Default bounds are intentionally permissive for normalized MediaPipe output:
+`x,y = -1.0..2.0` and `z = -4.0..4.0`. Tune them from captured data.
+
+## Configuration
+
+| Environment variable | Default |
+|---|---:|
+| `OUTPOST_INGEST_HOST` | `0.0.0.0` |
+| `OUTPOST_INGEST_PORT` | `9000` |
+| `OUTPOST_ESP32_HOST` | `192.168.50.20` |
+| `OUTPOST_ESP32_PORT` | `9100` |
+| `OUTPOST_NUM_LANDMARKS` | `33` |
+| `OUTPOST_MIN_VISIBILITY` | `0.40` |
+| `OUTPOST_MAX_FRAME_AGE_MS` | `150` |
+| `OUTPOST_MAX_FUTURE_SKEW_MS` | `1000` |
+| `OUTPOST_MAX_JUMP_PER_FRAME` | `0.50` |
+| `OUTPOST_MIN_GOOD_LANDMARKS` | `4` |
+| `OUTPOST_PRIORITY_LANDMARKS` | `13,14,15,16,17,18,19,20,21,22` |
+| `OUTPOST_PRIORITY_MIN_VISIBILITY` | `0.05` |
+| `OUTPOST_PRIORITY_MAX_JUMP_PER_FRAME` | `1.50` |
+| `OUTPOST_X_MIN`, `OUTPOST_X_MAX` | `-1.0`, `2.0` |
+| `OUTPOST_Y_MIN`, `OUTPOST_Y_MAX` | `-1.0`, `2.0` |
+| `OUTPOST_Z_MIN`, `OUTPOST_Z_MAX` | `-4.0`, `4.0` |
+| `OUTPOST_HEARTBEAT_INTERVAL_MS` | `500` |
+| `OUTPOST_STATS_INTERVAL_S` | `10` |
+| `OUTPOST_MAX_DATAGRAM_BYTES` | `65507` |
+
+All settings are validated at startup.
+
+## Local smoke test
+
+Run these commands in three terminals:
 
 ```bash
-# Terminal 1 — mock display
 python tools/mock_display.py
+```
 
-# Terminal 2 — fusion
-OUTPOST_DISPLAY_HOST=127.0.0.1 python -m outpost.main
+```bash
+OUTPOST_ESP32_HOST=127.0.0.1 python -m outpost.main --verbose
+```
 
-# Terminal 3 — mock phones
+```bash
 python tools/mock_phones.py
 ```
 
-Expect ~30 fused frames/sec on the display mock. Stop one phone sender to see degraded mode (`cameras_used` drops to 1).
+`tools/ingest_monitor.py` inspects phone traffic without filtering.
+`tools/phone_sender.py` runs MediaPipe against a webcam, URL, or video after
+`pip install -e ".[phone]"`.
+
+## Visualizing the input and output pose
+
+After `pip install -e ".[viz]"`, add `--visualize` to open a live window while
+the forwarder runs:
+
+```bash
+python -m outpost.main --visualize
+```
+
+The left panel draws every landmark the phone sent, with accepted joints in
+green and filtered joints in red. The right panel draws only the accepted
+landmarks that make up the outgoing frame. Combine with `--no-forward` to
+inspect filtering without sending anything to an ESP32.
 
 ## Tests
 
@@ -65,125 +149,5 @@ Expect ~30 fused frames/sec on the display mock. Stop one phone sender to see de
 pytest -v
 ```
 
-## Single phone (real hardware)
-
-One phone is enough — fusion runs in degraded mode with `cameras_used=['camera-a']`.
-
-### 1. Network
-
-Phone and laptop must be on the **same Wi‑Fi** (POSE-LAN or your home LAN).
-
-On POSE-LAN the laptop AP is **`192.168.50.1`** (see [PLAN.md](PLAN.md)). Phones get addresses like `192.168.50.11`–`192.168.50.13`.
-
-If you are not on POSE-LAN, find the laptop IP:
-
-```bash
-ip -4 addr show | grep inet
-```
-
-Allow ingest through the firewall if enabled:
-
-```bash
-sudo ufw allow 9000/udp
-```
-
-### 2. Verify ingest (optional)
-
-On the laptop, confirm packets arrive before starting fusion:
-
-```bash
-python tools/ingest_monitor.py
-```
-
-### 3. Run fusion on the laptop
-
-Without a display Pi (fuse only, log stats):
-
-```bash
-python -m outpost.main --no-display
-```
-
-With a local mock display:
-
-```bash
-# terminal A
-python tools/mock_display.py
-
-# terminal B
-OUTPOST_DISPLAY_HOST=127.0.0.1 python -m outpost.main
-```
-
-Add `--verbose` to see every ingest and fused frame.
-
-Live 3D fused skeleton:
-
-```bash
-python -m outpost.main --no-display --viz
-```
-
-Side-by-side camera views with 2D pose overlay (uses each phone's normalized image landmarks):
-
-```bash
-python -m outpost.main --no-display --viz-cameras
-```
-
-Both views together:
-
-```bash
-python -m outpost.main --no-display --viz --viz-cameras
-```
-
-Requires `pip install -e ".[viz]"` (matplotlib).
-
-### 4. Send pose from the phone
-
-**Option A — Python on the phone (Termux / Pydroid)**
-
-Copy the repo (or at least `tools/phone_sender.py` + `tools/pose_factory.py`) to the phone, install deps, run:
-
-```bash
-pip install mediapipe opencv-python
-python tools/phone_sender.py --camera-id camera-a
-```
-
-(`--host` defaults to `192.168.50.1`; override if your laptop is not the AP.)
-```
-
-**Option B — IP Webcam + laptop runs MediaPipe**
-
-Install [IP Webcam](https://play.google.com/store/apps/details?id=com.pas.webcam) on Android, start the server, then on the laptop:
-
-```bash
-pip install -e ".[phone]"
-python tools/phone_sender.py --host 127.0.0.1 --camera-id camera-a \
-  --source "http://PHONE_IP:8080/video"
-```
-
-Use a second terminal for fusion (`python -m outpost.main --no-display`). The sender posts to localhost; fusion listens on `0.0.0.0:9000`.
-
-**Option C — Laptop webcam (sanity check before phone)**
-
-```bash
-pip install -e ".[phone]"
-python tools/phone_sender.py --host 127.0.0.1 --camera-id camera-a --source 0
-```
-
-### Packet requirements
-
-The phone must send JSON UDP to `192.168.50.1:9000` (laptop ingest):
-
-| Field | Value |
-|-------|-------|
-| `camera_id` | `camera-a` or `camera-b` |
-| `seq` | monotonically increasing integer |
-| `t_capture_ms` | capture time in ms since epoch |
-| `landmarks` | 33 entries: `{i, x, y, z, v}` |
-
-### Troubleshooting
-
-| Symptom | Check |
-|---------|-------|
-| No packets in ingest monitor | Phone IP, laptop firewall, same subnet, correct `--host` |
-| Packets but no fused output | Clock skew — `t_capture_ms` must be within ~100 ms of laptop time |
-| `bad packet` logs | JSON format or missing fields |
-| Low FPS | Lower `--model-complexity 0` on sender; use 5 GHz Wi‑Fi |
+ESP32 firmware, Wi-Fi AP provisioning, and the future compact binary protocol
+with CRC are intentionally outside this Python implementation.

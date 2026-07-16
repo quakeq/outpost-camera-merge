@@ -1,3 +1,13 @@
-"""Outpost laptop fusion node: ingest UDP poses, fuse, send to display."""
+"""Outpost phone-landmark validation and forwarding service."""
 
-__version__ = "0.1.0"
+from .config import Settings, load_settings
+from .models import FilteredFrame, Landmark, LandmarkFrame, RawLandmark
+
+__all__ = [
+    "FilteredFrame",
+    "Landmark",
+    "LandmarkFrame",
+    "RawLandmark",
+    "Settings",
+    "load_settings",
+]

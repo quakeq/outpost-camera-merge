@@ -1,40 +1,39 @@
-"""Generate fake MediaPipe-style pose packets for testing."""
+"""Helpers for producing phone-protocol packets in tools and experiments."""
 
 from __future__ import annotations
 
 import json
-
-NUM_LANDMARKS = 33
+import time
+from typing import Iterable
 
 
 def make_landmarks(
-    offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
-    visibility: float = 1.0,
-) -> list[dict]:
-    ox, oy, oz = offset
+    *,
+    count: int = 33,
+    x: float = 0.5,
+    y: float = 0.5,
+    z: float = 0.0,
+    visibility: float = 0.99,
+) -> list[dict[str, int | float]]:
     return [
-        {
-            "i": i,
-            "x": float(i) * 0.01 + ox,
-            "y": float(i) * 0.02 + oy,
-            "z": float(i) * 0.005 + oz,
-            "v": visibility,
-        }
-        for i in range(NUM_LANDMARKS)
+        {"i": index, "x": x, "y": y, "z": z, "v": visibility}
+        for index in range(count)
     ]
 
 
 def make_packet(
-    camera_id: str,
     seq: int,
-    t_capture_ms: int,
-    offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
-    visibility: float = 1.0,
+    landmarks: Iterable[dict[str, int | float]],
+    *,
+    t_capture_ms: int | None = None,
 ) -> bytes:
-    payload = {
-        "camera_id": camera_id,
-        "seq": seq,
-        "t_capture_ms": t_capture_ms,
-        "landmarks": make_landmarks(offset=offset, visibility=visibility),
-    }
-    return json.dumps(payload).encode("utf-8")
+    if t_capture_ms is None:
+        t_capture_ms = time.time_ns() // 1_000_000
+    return json.dumps(
+        {
+            "seq": seq,
+            "t_capture_ms": t_capture_ms,
+            "landmarks": list(landmarks),
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")

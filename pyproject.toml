@@ -1,13 +1,13 @@
 [project]
 name = "outpost-camera-merge"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.11"
-description = "Laptop pose fusion node: UDP ingest from phones → sync/fuse → display Pi"
+description = "Low-latency MediaPipe landmark validation and ESP32 forwarding node"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 phone = ["mediapipe>=0.10.0", "opencv-python>=4.8.0"]
-viz = ["matplotlib>=3.8"]
+viz = ["matplotlib>=3.7.0"]
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -18,9 +18,6 @@ packages = ["outpost"]
 
 [tool.setuptools.package-dir]
 outpost = "src"
-
-[tool.setuptools.package-data]
-outpost = ["cameras.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
