@@ -7,7 +7,7 @@ import socket
 import time
 from typing import Any
 
-from .models import FilteredFrame
+from .models import DisplayPacket
 
 
 class DatagramTooLarge(ValueError):
@@ -28,8 +28,10 @@ def encode_message(message: dict[str, Any], max_bytes: int = 65_507) -> bytes:
     return payload
 
 
-def encode_frame(frame: FilteredFrame, max_bytes: int = 65_507) -> bytes:
-    return encode_message(frame.to_wire(), max_bytes=max_bytes)
+def encode_display_packet(
+    packet: DisplayPacket, max_bytes: int = 65_507
+) -> bytes:
+    return encode_message(packet.to_wire(), max_bytes=max_bytes)
 
 
 def encode_heartbeat(
@@ -44,7 +46,7 @@ def encode_heartbeat(
 
 
 class UdpSender:
-    """Send frames and heartbeats to one ESP32 endpoint."""
+    """Send display packets and heartbeats to one ESP32 endpoint."""
 
     def __init__(
         self,
@@ -59,9 +61,10 @@ class UdpSender:
         self.socket = sock or socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._owns_socket = sock is None
 
-    def send_frame(self, frame: FilteredFrame) -> int:
+    def send_packet(self, packet: DisplayPacket) -> int:
         return self.socket.sendto(
-            encode_frame(frame, self.max_datagram_bytes), self.destination
+            encode_display_packet(packet, self.max_datagram_bytes),
+            self.destination,
         )
 
     def send_heartbeat(self, t_send_ms: int | None = None) -> int:

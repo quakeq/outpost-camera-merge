@@ -1,6 +1,6 @@
 OUTPOST PLAN — PHONE, LAPTOP FILTER, AND ESP32 DISPLAY
 =====================================================
-Part of: Phone MediaPipe landmarks → Laptop validation → ESP32 display
+Part of: Phone MediaPipe landmarks → Laptop validation + Pico USB motor → ESP32 display
 See also: phones.txt, display.txt
 
 
@@ -9,12 +9,14 @@ ROLE
 
 The phone captures the subject and runs MediaPipe. It sends landmark frames to the
 laptop over Wi-Fi. The laptop receives each frame, rejects invalid or unreliable
-landmarks, and sends only the accepted landmark data to the ESP32 over 2.4 GHz.
-The ESP32 receives the filtered data and drives the display.
+landmarks, polls a Raspberry Pico stepper controller over USB CDC for
+position (1/16 microstepping), and sends the shaft angle plus five filtered pose
+targets to the ESP32 over 2.4 GHz. The ESP32 tracks only the head, both hands,
+and both feet.
 
-Keep MediaPipe inference on the phone. The laptop is responsible only for packet
-validation, landmark filtering, and forwarding. The ESP32 is responsible for
-display timing and rendering.
+Keep MediaPipe inference on the phone. The laptop is responsible for packet
+validation, landmark filtering, USB motor polling, and composing the display
+packet. The ESP32 is responsible for display timing and rendering.
 
 
 DATAFLOW
@@ -23,14 +25,15 @@ DATAFLOW
 Phone ── landmarks over Wi-Fi ──► Laptop
                                       │
                                       ├─ reject malformed, stale, or low-quality landmarks
-                                      └─ send accepted landmark data over 2.4 GHz
+Pico USB ── pos/target ───────────────┤
+                                      └─ send angle + 5 targets over 2.4 GHz
                                                        │
                                                        ▼
                                                      ESP32 ──► Display
 
-Each phone frame is processed independently. The laptop does not combine multiple
-camera views or create replacement landmarks. If a landmark is bad, it is omitted
-from the outgoing frame.
+Each phone frame is processed independently. Landmarks gate freshness: only a
+validated frame plus a fresh motor sample produces an outbound packet. The
+landmark list itself is not forwarded to the ESP32.
 
 
 LAN SETUP
@@ -173,53 +176,68 @@ SUGGESTED LAPTOP MODULES
 ------------------------
 
   outpost/
-    config.py      # addresses, ports, and validation thresholds
-    models.py      # Landmark, LandmarkFrame, and FilteredFrame
+    config.py      # addresses, ports, motor, and validation thresholds
+    models.py      # Landmark, LandmarkFrame, FilteredFrame, DisplayPacket
     receiver.py    # UDP input from the phone
     validator.py   # frame and landmark quality checks
-    sender.py      # compact UDP output to the ESP32
-    main.py        # receive, filter, and forward loop
+    motor.py       # Pico USB CDC poll + step→degree (3200 microsteps/rev)
+    sender.py      # compact UDP angle + five-target output to the ESP32
+    main.py        # receive, filter, compose, and forward loop
 
 The forwarding path is:
 1. Receive one phone packet
 2. Parse and validate its frame metadata
 3. Filter its landmarks
 4. Drop the frame if too few landmarks remain
-5. Encode the accepted landmarks
-6. Send the filtered frame immediately to the ESP32
+5. Require accepted head, wrist, and ankle landmarks
+6. Read the latest Pico USB position and convert it to degrees
+7. Encode a DisplayPacket containing angle plus the five target coordinates
+8. Send the packet immediately to the ESP32
 
-No fixed-rate processing loop is necessary. Processing each packet as it arrives
-reduces latency and avoids forwarding duplicate state.
+A background motor poller keeps USB I/O off the UDP hot path. Processing each
+phone packet as it arrives reduces latency and avoids forwarding duplicate state.
 
 
 LAPTOP TO ESP32
 ---------------
 
-Send filtered landmark frames over UDP to 192.168.50.20:9100 on the 2.4 GHz LAN.
+Send compact display packets over UDP to 192.168.50.20:9100 on the 2.4 GHz LAN.
 
 Prototype output packet:
 
 {
   "frame_id": 1842,
   "t_capture_ms": 1784185200123,
-  "accepted": [
-    {"i": 0, "x": 0.51, "y": 0.22, "z": -0.08, "v": 0.98},
-    {"i": 1, "x": 0.49, "y": 0.25, "z": -0.06, "v": 0.91}
-  ],
-  "rejected": [2, 3]
+  "angle": 137.25,
+  "targets": [
+    {"part": "head", "x": 0.51, "y": 0.22, "z": -0.08},
+    {"part": "left_hand", "x": 0.20, "y": 0.45, "z": 0.01},
+    {"part": "right_hand", "x": 0.80, "y": 0.45, "z": 0.02},
+    {"part": "left_foot", "x": 0.42, "y": 0.91, "z": 0.03},
+    {"part": "right_foot", "x": 0.58, "y": 0.91, "z": 0.04}
+  ]
 }
 
-Use JSON while prototyping because it is easy to inspect. Move to a compact binary
-format after the pipeline works reliably. A binary packet should contain:
-- Protocol version
-- Frame ID
-- Capture timestamp
-- Accepted-landmark count
-- Repeated index, x, y, z, and visibility values
-- Checksum or CRC
+`angle` is the current shaft angle in degrees [0, 360) from polled position
+microsteps. `targets` contains only the validated head/nose, wrists, and ankles.
+Default STEPS_PER_REV = 3200 (200 full steps × 1/16 microstepping).
 
-Keep each UDP datagram below the network MTU to avoid IP fragmentation. Quantized
-16-bit coordinates are preferable if JSON packets become too large.
+Use JSON while prototyping because it is easy to inspect. A later binary packet
+may pack version, frame ID, timestamp, angle, five targets, and CRC.
+
+Keep each UDP datagram below the network MTU to avoid IP fragmentation.
+
+
+USB MOTOR POLL (RASPBERRY PICO)
+-------------------------------
+
+Open the Pico CDC serial device (OUTPOST_MOTOR_PORT) at OUTPOST_MOTOR_BAUD.
+Poll every OUTPOST_MOTOR_POLL_MS by writing `?\n` and reading one line:
+
+  pos=<int> target=<int>
+
+If the newest sample is older than OUTPOST_MOTOR_STALE_MS, skip the forward and
+count a motor_stale rejection. Heartbeats continue while motor samples are stale.
 
 
 ESP32 DISPLAY BEHAVIOR
@@ -228,14 +246,11 @@ ESP32 DISPLAY BEHAVIOR
 The ESP32 listens on UDP port 9100 and verifies each packet before display:
 1. Reject unknown protocol versions or malformed payloads
 2. Reject duplicate or older frame IDs
-3. Verify packet length and checksum when using the binary format
-4. Update only landmarks included in the accepted list
-5. Mark rejected or missing landmarks unavailable
-6. Blank or enter a safe idle state after a receive timeout
+3. Verify packet length and checksum when using a binary format
+4. Unpack angle and the five targets for on-the-fly point rendering
+5. Blank or enter a safe idle state after a receive timeout
 
-The ESP32 must not treat a missing landmark as coordinate zero. It may briefly hold
-the last accepted value for visual stability, but it must expire held values after
-a short timeout.
+ESP32 firmware that consumes these packets lives outside this Python repository.
 
 
 RELIABILITY PATTERNS
@@ -262,8 +277,9 @@ SUGGESTED STACK
 | Phone input          | UDP on laptop port 9000             |
 | Laptop processing    | Python first; C++ if needed         |
 | Landmark validation  | Range, confidence, age, and motion  |
+| USB motor poll       | Pico CDC `pos=` / `target=` @ 1/16  |
 | ESP32 output         | UDP on ESP32 port 9100              |
-| Prototype encoding   | JSON                                |
+| Prototype encoding   | JSON angle + five pose targets      |
 | Production encoding  | Compact binary packet with CRC      |
 | Display control      | ESP32 local rendering and timing    |
 

@@ -50,6 +50,13 @@ class Settings:
     heartbeat_interval_ms: int = 500
     stats_interval_s: float = 10.0
     max_datagram_bytes: int = 65_507
+    # Raspberry Pico USB CDC; empty port uses an in-process mock motor.
+    motor_port: str = ""
+    motor_baud: int = 115_200
+    motor_poll_ms: int = 20
+    motor_stale_ms: int = 100
+    # 200 full steps/rev × 1/16 microstepping.
+    steps_per_rev: int = 3_200
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -86,6 +93,12 @@ class Settings:
             raise ValueError("heartbeat and stats intervals must be positive")
         if self.max_datagram_bytes <= 0 or self.max_datagram_bytes > 65_507:
             raise ValueError("max_datagram_bytes must be within the UDP payload limit")
+        if self.motor_baud <= 0:
+            raise ValueError("motor_baud must be positive")
+        if self.motor_poll_ms <= 0 or self.motor_stale_ms <= 0:
+            raise ValueError("motor poll and stale intervals must be positive")
+        if self.steps_per_rev <= 0:
+            raise ValueError("steps_per_rev must be positive")
         for axis in ("x", "y", "z"):
             lower = getattr(self, f"{axis}_min")
             upper = getattr(self, f"{axis}_max")
@@ -127,4 +140,9 @@ def load_settings() -> Settings:
         heartbeat_interval_ms=_env("OUTPOST_HEARTBEAT_INTERVAL_MS", 500, int),
         stats_interval_s=_env("OUTPOST_STATS_INTERVAL_S", 10.0, float),
         max_datagram_bytes=_env("OUTPOST_MAX_DATAGRAM_BYTES", 65_507, int),
+        motor_port=os.getenv("OUTPOST_MOTOR_PORT", ""),
+        motor_baud=_env("OUTPOST_MOTOR_BAUD", 115_200, int),
+        motor_poll_ms=_env("OUTPOST_MOTOR_POLL_MS", 20, int),
+        motor_stale_ms=_env("OUTPOST_MOTOR_STALE_MS", 100, int),
+        steps_per_rev=_env("OUTPOST_STEPS_PER_REV", 3_200, int),
     )

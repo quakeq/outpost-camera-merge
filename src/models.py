@@ -58,3 +58,39 @@ class FilteredFrame:
             "accepted": [landmark.to_wire() for landmark in self.accepted],
             "rejected": list(self.rejected),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class DisplayTarget:
+    """One validated body endpoint sent to the volumetric display."""
+
+    part: str
+    x: float
+    y: float
+    z: float
+
+    def to_wire(self) -> dict[str, str | float]:
+        return {
+            "part": self.part,
+            "x": self.x,
+            "y": self.y,
+            "z": self.z,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DisplayPacket:
+    """Current motor angle and five pose targets keyed by pose frame."""
+
+    frame_id: int
+    t_capture_ms: int
+    angle: float
+    targets: tuple[DisplayTarget, ...]
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "frame_id": self.frame_id,
+            "t_capture_ms": self.t_capture_ms,
+            "angle": self.angle,
+            "targets": [target.to_wire() for target in self.targets],
+        }

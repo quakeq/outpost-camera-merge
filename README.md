@@ -3,12 +3,16 @@
 Low-latency laptop service for:
 
 ```text
-Phone MediaPipe → UDP :9000 → validate/filter → UDP :9100 → ESP32
+Phone MediaPipe → UDP :9000 → validate/filter
+Raspberry Pico USB CDC → poll pos/target (1/16 microstep)
+                          └─ compose angle+5 pose targets → UDP :9100 → ESP32
 ```
 
-Each phone frame is handled independently and forwarded immediately. The laptop
-does not fuse cameras or invent replacement landmarks. See [PLAN.md](PLAN.md)
-for the complete network and hardware design.
+Each phone frame is validated independently. When a frame passes filtering and a
+fresh USB motor sample is available, the laptop sends the shaft angle and five
+validated pose targets
+packet to the ESP32. See [PLAN.md](PLAN.md) for the complete network and
+hardware design.
 
 ## Install and run
 
@@ -21,13 +25,22 @@ pip install -e ".[dev]"
 python -m outpost.main
 ```
 
-The defaults listen on `0.0.0.0:9000` and send to
-`192.168.50.20:9100`. Add `--verbose` for every decision or `--no-forward`
-to validate and log without sending.
+For a real Raspberry Pico stepper controller, install the motor extra and set
+the serial port:
+
+```bash
+pip install -e ".[motor]"
+OUTPOST_MOTOR_PORT=/dev/ttyACM0 python -m outpost.main --require-motor
+```
+
+If `OUTPOST_MOTOR_PORT` is unset, the service uses an in-process mock motor.
+The defaults listen on `0.0.0.0:9000` and send to `192.168.50.20:9100`. Add
+`--verbose` for every decision or `--no-forward` to validate and log without
+sending.
 
 The phone and laptop clocks must be synchronized closely enough for the
-150 ms stale-frame check. On Linux, allow input with
-`sudo ufw allow 9000/udp` if a firewall is active.
+stale-frame check. On Linux, allow input with `sudo ufw allow 9000/udp` if a
+firewall is active.
 
 ## Wire protocol
 
@@ -47,32 +60,50 @@ The phone sends one JSON object per UDP datagram:
 epoch milliseconds. Landmark indices must be unique; scalar quality is checked
 individually so one bad landmark does not necessarily drop the frame.
 
-The ESP32 receives:
+The ESP32 receives a compact display packet (not the landmark list):
 
 ```json
 {
   "frame_id": 1842,
   "t_capture_ms": 1784185200123,
-  "accepted": [
-    {"i": 0, "x": 0.51, "y": 0.22, "z": -0.08, "v": 0.98}
-  ],
-  "rejected": [1, 2]
+  "angle": 137.25,
+  "targets": [
+    {"part": "head", "x": 0.51, "y": 0.22, "z": -0.08},
+    {"part": "left_hand", "x": 0.20, "y": 0.45, "z": 0.01},
+    {"part": "right_hand", "x": 0.80, "y": 0.45, "z": 0.02},
+    {"part": "left_foot", "x": 0.42, "y": 0.91, "z": 0.03},
+    {"part": "right_foot", "x": 0.58, "y": 0.91, "z": 0.04}
+  ]
 }
 ```
 
-Accepted and rejected indices are sorted. Missing expected landmarks are
-rejected explicitly; coordinates are never replaced with zeroes. When no frame
-is forwarded for 500 ms, the laptop sends:
+`angle` is the shaft position in `[0, 360)`, derived from the Pico's polled
+position using `OUTPOST_STEPS_PER_REV` (default 3200 = 200 full steps × 1/16
+microstepping). Targets are validated MediaPipe coordinates from landmark 0
+(head/nose), 15/16 (wrists), and 27/28 (ankles). A frame is not forwarded
+unless all five targets pass filtering. When no frame is forwarded for 500 ms,
+the laptop sends:
 
 ```json
 {"type":"heartbeat","t_send_ms":1784185200623}
 ```
 
+### USB motor poll protocol (Raspberry Pico CDC)
+
+The laptop writes `?\n` on the CDC serial port and expects one reply line:
+
+```text
+pos=<int> target=<int>
+```
+
+Values are microsteps at 1/16 resolution.
+
 ## Filtering
 
 A whole frame is discarded for malformed JSON/structure, duplicate indices,
-non-increasing sequence, stale/future timestamp, impossible count, or fewer than
-the configured minimum number of good landmarks.
+non-increasing sequence, stale/future timestamp, impossible count, fewer than
+the configured minimum number of good landmarks, or a missing/stale motor
+sample (`motor_stale`).
 
 Individual landmarks are rejected for unknown index, non-numeric or non-finite
 values, visibility below threshold, coordinates outside safety bounds, or a
@@ -106,6 +137,11 @@ Default bounds are intentionally permissive for normalized MediaPipe output:
 | `OUTPOST_HEARTBEAT_INTERVAL_MS` | `500` |
 | `OUTPOST_STATS_INTERVAL_S` | `10` |
 | `OUTPOST_MAX_DATAGRAM_BYTES` | `65507` |
+| `OUTPOST_MOTOR_PORT` | _(empty = mock motor)_ |
+| `OUTPOST_MOTOR_BAUD` | `115200` |
+| `OUTPOST_MOTOR_POLL_MS` | `20` |
+| `OUTPOST_MOTOR_STALE_MS` | `100` |
+| `OUTPOST_STEPS_PER_REV` | `3200` |
 
 All settings are validated at startup.
 
@@ -140,7 +176,7 @@ python -m outpost.main --visualize
 
 The left panel draws every landmark the phone sent, with accepted joints in
 green and filtered joints in red. The right panel draws only the accepted
-landmarks that make up the outgoing frame. Combine with `--no-forward` to
+landmarks used for gating the display packet. Combine with `--no-forward` to
 inspect filtering without sending anything to an ESP32.
 
 ## Tests
@@ -149,5 +185,5 @@ inspect filtering without sending anything to an ESP32.
 pytest -v
 ```
 
-ESP32 firmware, Wi-Fi AP provisioning, and the future compact binary protocol
-with CRC are intentionally outside this Python implementation.
+ESP32 firmware unpack/render and Pico motor firmware are intentionally outside
+this Python implementation.

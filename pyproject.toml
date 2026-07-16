@@ -8,6 +8,7 @@ description = "Low-latency MediaPipe landmark validation and ESP32 forwarding no
 dev = ["pytest>=8.0"]
 phone = ["mediapipe>=0.10.0", "opencv-python>=4.8.0"]
 viz = ["matplotlib>=3.7.0"]
+motor = ["pyserial>=3.5"]
 
 [build-system]
 requires = ["setuptools>=61"]
