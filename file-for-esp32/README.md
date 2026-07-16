@@ -2,16 +2,15 @@
 
 Flash [`outpost_display/outpost_display.ino`](outpost_display/outpost_display.ino)
 with the Arduino IDE (ESP32 board package) and the [FastLED](https://github.com/FastLED/FastLED)
-library.
+library. The sketch is self-contained; there are no additional source tabs.
 
 ## What it does
 
 Joins **POSE-LAN** as `192.168.50.20`, listens for laptop UDP JSON on port
-**9100**, and paints a 16×16 WS2812 panel for the current shaft `angle`.
+**9100**, and paints a fixed front-facing view on a 16×16 WS2812 panel.
 
 ```text
-Laptop  ── JSON angle + 5 targets :9100 ──►  ESP32  ──►  WS2812 16×16
-Pico USB motor (separate) supplies angle via the laptop forwarder
+Laptop  ── JSON + 5 targets :9100 ──►  ESP32  ──►  WS2812 16×16
 ```
 
 Packet shapes match `outpost.sender`:
@@ -31,8 +30,9 @@ Packet shapes match `outpost.sender`:
 }
 ```
 
-The cylinder body remains static. Only those five points move; the ESP32 does
-not animate a skeleton, torso, or motor target.
+The body remains static and all five points are projected directly from x/y
+coordinates. The ESP32 ignores `angle` and z-depth, so screen rotation does not
+change the image.
 
 ```json
 {"type":"heartbeat","t_send_ms":1784185200623}
@@ -43,18 +43,20 @@ the panel blanks; while waiting for the first frame an idle chase runs.
 
 ## Wiring
 
-| ESP32 | Panel        |
-|-------|--------------|
-| GPIO 2 (default `LED_PIN`) | WS2812 DIN |
-| GND   | GND          |
+| ESP32-S3 | Panel |
+|-----------|-------|
+| GPIO 4 | top-left 8×8 DIN |
+| GPIO 5 | top-right 8×8 DIN |
+| GPIO 6 | bottom-left 8×8 DIN |
+| GPIO 7 | bottom-right 8×8 DIN |
+| GND | all panel and 5 V supply grounds |
 
 Power the matrix from a stout **5 V** supply (not the ESP32 5 V pin). Common
-ground is required. Edit `LED_PIN` / brightness in
-[`outpost_display/config.h`](outpost_display/config.h).
+ground is required. The sketch caps FastLED at 2 A and brightness 40.
 
 ## Config to edit before flash
 
-In [`outpost_display/config.h`](outpost_display/config.h):
+Near the top of [`outpost_display.ino`](outpost_display/outpost_display.ino):
 
 | Symbol | Default | Notes |
 |--------|---------|--------|
@@ -62,7 +64,25 @@ In [`outpost_display/config.h`](outpost_display/config.h):
 | `WIFI_PASS` | `outpost123` | Change to your WPA2 passphrase |
 | `WIFI_IP` | `192.168.50.20` | Reserved ESP32 address from PLAN.md |
 | `UDP_PORT` | `9100` | `OUTPOST_ESP32_PORT` |
-| `LED_PIN` | `2` | WS2812 data |
+| `SERPENTINE` | `false` | Use `true` if each 8×8 panel zigzags |
+| `LED_POWER_MA` | `2000` | Match the safe output of your supply |
+
+## Flash with Arduino IDE
+
+1. Install Arduino IDE 2.
+2. In **Boards Manager**, install **esp32 by Espressif Systems**.
+3. In **Library Manager**, install **FastLED**.
+4. Open `file-for-esp32/outpost_display/outpost_display.ino`.
+5. Select **Tools → Board → esp32 → ESP32S3 Dev Module**.
+6. Set **Tools → USB CDC On Boot → Enabled**. This may not be your default, so
+   select it explicitly.
+7. Connect the ESP32-S3 over its data-capable USB connector and select its port
+   under **Tools → Port**.
+8. Click **Upload**.
+
+If upload remains at `Connecting...`, hold **BOOT**, tap **RESET**, release
+**BOOT** when writing starts, and retry. Open Serial Monitor at **115200 baud**
+after upload.
 
 ## Bring-up
 
@@ -95,8 +115,8 @@ s.sendto(json.dumps({
 "
 ```
 
-You should see the dim cyan cylinder body plus the five colored target points
-when they intersect the panel's current rotational slice.
+You should see the dim cyan body plus all five colored target points in a fixed
+front-facing view.
 
 ## Safety
 

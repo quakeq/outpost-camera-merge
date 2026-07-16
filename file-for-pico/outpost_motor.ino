@@ -23,40 +23,38 @@ static const uint8_t PIN_STEP = 2;
 static const uint8_t PIN_DIR = 3;
 static const uint8_t PIN_EN = 4;  // active LOW on most A4988/DRV8825 boards
 
-static const bool EN_ACTIVE_LOW = true;
 static const uint32_t STEP_PULSE_US = 4;
 static const uint32_t STEPS_PER_REV = 3200;
-static const uint32_t START_STEP_RATE = 800;
-static const uint32_t FAST_STEP_RATE = 12500;  // ~234 RPM at 1/16 microstepping
-static const uint32_t RAMP_TIME_US = 2000000;  // ramp up so the motor does not stall
+
+// Speed tuning (delay between step half-cycles; lower = faster)
+static const uint32_t MIN_DELAY_MICROS = 200;   // top speed
+static const uint32_t MAX_DELAY_MICROS = 2000;  // startup torque
+static const uint32_t ACCEL_STEP = 5;           // ramp smoothness
 
 static int32_t position_steps = 0;
 static bool motor_enabled = false;
+static bool decelerating = false;
+static uint32_t current_delay_micros = MAX_DELAY_MICROS;
 static uint32_t last_step_us = 0;
-static uint32_t ramp_start_us = 0;
 
 static String line_buf;
 
-static void set_enabled(bool on) {
-  if (on && !motor_enabled) {
-    ramp_start_us = micros();
-    last_step_us = ramp_start_us;
-  }
-  motor_enabled = on;
-  const bool level = EN_ACTIVE_LOW ? !on : on;
-  digitalWrite(PIN_EN, level ? HIGH : LOW);
+static void set_driver_enabled(bool on) {
+  digitalWrite(PIN_EN, on ? LOW : HIGH);
 }
 
-static uint32_t step_interval_us(uint32_t now) {
-  uint32_t elapsed = now - ramp_start_us;
-  if (elapsed > RAMP_TIME_US) {
-    elapsed = RAMP_TIME_US;
+static void set_enabled(bool on) {
+  if (on) {
+    decelerating = false;
+    current_delay_micros = MAX_DELAY_MICROS;
+    last_step_us = micros();
+    motor_enabled = true;
+    set_driver_enabled(true);
+    return;
   }
-  const uint32_t rate =
-      START_STEP_RATE +
-      (uint32_t)(((uint64_t)(FAST_STEP_RATE - START_STEP_RATE) * elapsed) /
-                 RAMP_TIME_US);
-  return 1000000 / rate;
+  if (motor_enabled) {
+    decelerating = true;
+  }
 }
 
 static void step_once() {
@@ -67,15 +65,39 @@ static void step_once() {
 }
 
 static void service_motion() {
-  if (!motor_enabled) {
+  if (!motor_enabled && !decelerating) {
     return;
   }
+
   const uint32_t now = micros();
-  if ((uint32_t)(now - last_step_us) < step_interval_us(now)) {
+  const uint32_t interval = current_delay_micros * 2;
+  if ((uint32_t)(now - last_step_us) < interval) {
     return;
   }
   last_step_us = now;
   step_once();
+
+  if (decelerating) {
+    if (current_delay_micros < MAX_DELAY_MICROS) {
+      current_delay_micros += ACCEL_STEP;
+      if (current_delay_micros > MAX_DELAY_MICROS) {
+        current_delay_micros = MAX_DELAY_MICROS;
+      }
+    } else {
+      motor_enabled = false;
+      decelerating = false;
+      set_driver_enabled(false);
+    }
+    return;
+  }
+
+  if (motor_enabled && current_delay_micros > MIN_DELAY_MICROS) {
+    if (current_delay_micros > MIN_DELAY_MICROS + ACCEL_STEP) {
+      current_delay_micros -= ACCEL_STEP;
+    } else {
+      current_delay_micros = MIN_DELAY_MICROS;
+    }
+  }
 }
 
 static void reply_state() {
@@ -120,16 +142,16 @@ void setup() {
   pinMode(PIN_STEP, OUTPUT);
   pinMode(PIN_DIR, OUTPUT);
   pinMode(PIN_EN, OUTPUT);
+
   digitalWrite(PIN_STEP, LOW);
-  digitalWrite(PIN_DIR, HIGH);  // fixed direction: change to LOW to reverse
-  delayMicroseconds(2);
+  digitalWrite(PIN_DIR, HIGH);
+  set_driver_enabled(true);
   set_enabled(true);
 
   Serial.begin(115200);
   while (!Serial && millis() < 2000) {
     // USB CDC enumerate
   }
-  // A fresh flash ramps up and then spins continuously in one direction.
 }
 
 void loop() {

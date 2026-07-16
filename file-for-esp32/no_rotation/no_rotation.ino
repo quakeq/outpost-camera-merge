@@ -16,10 +16,9 @@
  *      {"part":"right_foot","x":0.6,"y":0.9,"z":0.1}]}
  *   {"type":"heartbeat","t_send_ms":...}
  *
- * `angle` is the current shaft angle in degrees [0, 360).
  * The five targets are the head, wrists, and ankles in MediaPipe coordinates.
- * The diameter-mounted panel paints a static cylinder plus targets intersecting
- * its current slice. Only the five targets are animated.
+ * The panel paints a fixed 2D view and intentionally ignores screen rotation,
+ * shaft angle, and target depth. Only the five targets are animated.
  *
  * Four independent 8x8 WS2812B panels arranged:
  *   [GPIO4][GPIO5]
@@ -59,11 +58,6 @@ static const bool SERPENTINE = false;
 static const uint8_t LED_BRIGHTNESS = 40;
 static const uint16_t LED_POWER_MA = 2000;
 
-// Pose target mapping and rotating-slice thickness, in LED-pitch units.
-static const float TARGET_X_SCALE = 10.0f;
-static const float TARGET_Z_SCALE = 10.0f;
-static const float TARGET_SLICE_HALF_WIDTH = 1.25f;
-
 WiFiUDP Udp;
 
 CRGB leds[TOTAL];
@@ -73,7 +67,6 @@ static uint8_t frameRgb[PANEL_PIXELS * 3];
 struct PoseTarget {
   float x;
   float y;
-  float z;
 };
 
 static const uint8_t TARGET_COUNT = 5;
@@ -88,7 +81,6 @@ static const uint8_t TARGET_COLORS[TARGET_COUNT][3] = {
 };
 
 static int32_t lastFrameId = -1;
-static float currentAngle = 0.0f;
 static PoseTarget currentTargets[TARGET_COUNT];
 static bool havePose = false;
 static uint32_t lastRxMs = 0;
@@ -128,8 +120,8 @@ static void led_driver_show_rgb888(const uint8_t *rgb888) {
 
 static void led_driver_begin() {
   FastLED.addLeds<WS2812B, 4, GRB>(leds, 0 * PANEL, PANEL);
-  FastLED.addLeds<WS2812B, 6, GRB>(leds, 1 * PANEL, PANEL);
-  FastLED.addLeds<WS2812B, 5, GRB>(leds, 2 * PANEL, PANEL);
+  FastLED.addLeds<WS2812B, 5, GRB>(leds, 1 * PANEL, PANEL);
+  FastLED.addLeds<WS2812B, 6, GRB>(leds, 2 * PANEL, PANEL);
   FastLED.addLeds<WS2812B, 7, GRB>(leds, 3 * PANEL, PANEL);
   FastLED.setMaxPowerInVoltsAndMilliamps(5, LED_POWER_MA);
   FastLED.setBrightness(LED_BRIGHTNESS);
@@ -203,27 +195,14 @@ static bool json_get_target(const char *json, const char *part, PoseTarget *out)
   }
   double x = 0;
   double y = 0;
-  double z = 0;
   if (!json_get_number(partAt, "x", &x) ||
       !json_get_number(partAt, "y", &y) ||
-      !json_get_number(partAt, "z", &z) ||
-      !isfinite(x) || !isfinite(y) || !isfinite(z)) {
+      !isfinite(x) || !isfinite(y)) {
     return false;
   }
   out->x = (float)x;
   out->y = (float)y;
-  out->z = (float)z;
   return true;
-}
-
-static float wrap360(float deg) {
-  while (deg < 0.0f) {
-    deg += 360.0f;
-  }
-  while (deg >= 360.0f) {
-    deg -= 360.0f;
-  }
-  return deg;
 }
 
 static void set_pixel(uint8_t col, uint8_t row, uint8_t r, uint8_t g, uint8_t b) {
@@ -266,14 +245,11 @@ static void draw_target(int col, int row, const uint8_t color[3]) {
   }
 }
 
-/*
- * Intersect each 3D MediaPipe endpoint with the rotating panel plane.
- * u is position along the panel diameter; v is distance perpendicular to it.
- */
-static void render_slice(float angle_deg, const PoseTarget targets[TARGET_COUNT]) {
+// Render a fixed front-facing 2D view. Rotation and depth are not considered.
+static void render_display(const PoseTarget targets[TARGET_COUNT]) {
   memset(frameRgb, 0, sizeof(frameRgb));
 
-  // Static cylindrical body: identical vertical cross-section at every angle.
+  // Static body backdrop.
   for (uint8_t row = 0; row < PANEL_H; row++) {
     for (uint8_t col = 0; col < PANEL_W; col++) {
       const float radius = fabsf((float)col - 7.5f);
@@ -288,22 +264,9 @@ static void render_slice(float angle_deg, const PoseTarget targets[TARGET_COUNT]
     }
   }
 
-  const float radians = wrap360(angle_deg) * (PI / 180.0f);
-  const float cs = cosf(radians);
-  const float sn = sinf(radians);
-
   for (uint8_t i = 0; i < TARGET_COUNT; i++) {
-    const float x =
-        clampf((targets[i].x - 0.5f) * TARGET_X_SCALE, -7.5f, 7.5f);
-    const float z =
-        clampf(targets[i].z * TARGET_Z_SCALE, -7.5f, 7.5f);
-    const float u = x * cs + z * sn;
-    const float v = -x * sn + z * cs;
-    if (fabsf(v) > TARGET_SLICE_HALF_WIDTH) {
-      continue;
-    }
-
-    const int col = (int)lroundf(u + 7.5f);
+    const int col = (int)lroundf(
+        clampf(targets[i].x, 0.0f, 1.0f) * (PANEL_W - 1));
     const int row = (int)lroundf(
         clampf(targets[i].y, 0.0f, 1.0f) * (PANEL_H - 1));
     draw_target(col, row, TARGET_COLORS[i]);
@@ -320,7 +283,7 @@ static void show_idle() {
 }
 
 static void apply_display() {
-  render_slice(currentAngle, currentTargets);
+  render_display(currentTargets);
   led_driver_show_rgb888(frameRgb);
   blanked = false;
 }
@@ -332,10 +295,7 @@ static bool handle_json(const char *json) {
   }
 
   double frameId = 0;
-  double angle = 0;
-  if (!json_get_number(json, "frame_id", &frameId) ||
-      !json_get_number(json, "angle", &angle) ||
-      !isfinite(frameId) || !isfinite(angle)) {
+  if (!json_get_number(json, "frame_id", &frameId) || !isfinite(frameId)) {
     return false;
   }
 
@@ -354,7 +314,6 @@ static bool handle_json(const char *json) {
   }
 
   lastFrameId = id;
-  currentAngle = wrap360((float)angle);
   memcpy(currentTargets, parsedTargets, sizeof(currentTargets));
   havePose = true;
   lastRxMs = millis();
@@ -404,7 +363,7 @@ void setup() {
   Udp.begin(UDP_PORT);
   Serial.print("UDP listen :");
   Serial.println(UDP_PORT);
-  Serial.println("outpost_display ready (angle + 5 targets JSON)");
+  Serial.println("outpost_display ready (fixed 2D, 5 targets JSON)");
 }
 
 void loop() {
@@ -440,9 +399,7 @@ void loop() {
           Serial.print(" bad=");
           Serial.print(badCount);
           Serial.print(" dup=");
-          Serial.print(dupCount);
-          Serial.print(" angle=");
-          Serial.println(currentAngle, 1);
+          Serial.println(dupCount);
         }
       }
     }

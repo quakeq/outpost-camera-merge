@@ -30,10 +30,10 @@ class Settings:
     esp32_host: str = "192.168.50.20"
     esp32_port: int = 9100
     num_landmarks: int = 33
-    min_visibility: float = 0.30
+    min_visibility: float = 0.10
     max_frame_age_ms: int = 500
-    max_future_skew_ms: int = 1_000
-    max_jump_per_frame: float = 0.50
+    max_future_skew_ms: int = 1000
+    max_jump_per_frame: float = 1
     min_good_landmarks: int = 4
     # Elbows (13, 14) and hands (wrists and fingers, 15-22) drive the interaction
     # gestures we care about, so they are kept unless egregiously bad: their
